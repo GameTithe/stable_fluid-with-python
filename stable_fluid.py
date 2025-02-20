@@ -70,6 +70,74 @@ def main() :
         signature="(),(d)->(d)",
     )
     
+    def partial_derivative_x(field) : 
+        
+        diff = np.zeros_like(field)
+        
+        diff[1: -1, 1: -1] = (
+            (
+                field[2: , 1:-1]
+                -
+                field[0:-2, 1:-1]
+            ) / ( 2 * element_length)
+        ) 
+        return diff 
+      
+    def partial_derivative_y(field) : 
+        diff = np.zeros_like(field)
+        
+        diff[1: -1, 1: -1] = (
+            (
+                field[1:-1, 2: ]
+                -
+                field[1:-1, 0:-2]
+            ) / ( 2 * element_length)
+        )
+        return diff 
+        
+    def laplace(field):
+        diff = np.zeros_like(field)
+        
+        # explicit
+        diff[1:-1, 1:-1] = (
+            field[0:-2, 1:-1]
+            +
+            field[2: , 1:-1]
+            +
+            field[1:-1, 0:-2]
+            +
+            field[1:-1, 2: ]
+            -4 * 
+            field[1:-1, 1:-1]
+        ) / (element_length ** 2)
+        
+        return diff
+    
+    def divergence(vector_field):
+        divergence_applied = (
+            partial_derivative_x(vector_field[..., 0])
+            +
+            partial_derivative_y(vector_field[..., 1])
+        ) 
+        
+        return divergence_applied
+    
+    def gradient(field) :
+        gradient_applied = np.concatenate(
+            (
+                partial_derivative_x(field)[..., np.newaxis],
+                partial_derivative_y(field)[..., np.newaxis],
+            ),
+            axis=-1,
+        )
+    
+        return gradient_applied
+    
+    def poisson_operator(field_flattened):
+        field = field_flattened.reshape(scalar_shape)
+
+        poisson_applied = laplace(field)
+        return poisson_applied.flatten()
     
     # advection
     def advect(field, vector_field):
@@ -84,16 +152,35 @@ def main() :
             DOMAIN_SIZE, 
         )
     
-    advect_field = interpolate.interpn(
-        points=(x,y),
-        values=field,
-        xi=backtraced_positions,
-    )
+        advect_field = interpolate.interpn(
+            points=(x,y),
+            values=field,
+            xi=backtraced_positions,
+        )
+        
+        return advect_field
+    
+    def diffusion_operator(vector_field_flattenend):
+        vector_field = vector_field_flattenend.reshape(vector_shape)
+        
+        diffusion_applied = (
+            vector_field
+            - 
+            KINEMATIC_VISCOSITY 
+            * 
+            TIME_STEP_LENGHT
+            *
+            laplace(vector_field)
+        ) 
+        
+        return diffusion_applied.flatten()
+    
+    plt.style.use("dark_background")
+    plt.figure(figsize=(3,3), dpi=160)    
     
     velocities_prev = np.zeros(vector_shape)
-    
-    time_current = 0.0
-    for i in tqdm(range(N_TIME_STEPS)):
+    time_current = 0.0 
+    for i in tqdm(range(N_TIME_STEPS)): 
         time_current += TIME_STEP_LENGHT
         
         forces = forcing_function_vectorized(
@@ -101,17 +188,62 @@ def main() :
             coordinates,
         )
     
-    # (1) Apply Forces
-    velocities_forces_applies = (
-        velocities_prev
-        +
-        TIME_STEP_LENGHT
-        *
-        forces
-    )    
-     
-    # (2) Nonlinear convection (= self advection)
- 
+        # (1) Apply Forces
+        velocities_forces_applies = (
+            velocities_prev
+            +
+            TIME_STEP_LENGHT
+            *
+            forces
+        )    
+        
+        # (2) Nonlinear convection (= self advection)
+        velocities_advected = advect(
+            field = velocities_forces_applies,
+            vector_field=velocities_forces_applies
+        )
+        
+        # (3) Diffusion
+        velocities_diffused = splinalg.cg(
+            A=splinalg.LinearOperator(
+                shape=(vector_dof, vector_dof),
+                matvec=diffusion_operator,
+            ),
+            b=velocities_advected.flatten(),
+            maxiter=MAX_ITER_CG
+        )[0].reshape(vector_shape)
+
+        # (4.1) Compute a pressure correction 
+        pressure = splinalg.cg(
+            A=splinalg.LinearOperator(
+                shape=(scalar_dof, scalar_dof),
+                matvec=poisson_operator,
+            ),
+            b=divergence(velocities_diffused).flatten(),
+            maxiter=MAX_ITER_CG
+        )[0].reshape(scalar_shape)
+        
+        # (4.2) Correct the velocities to be incompressive
+        velocities_projected = (
+            velocities_diffused
+            -
+            gradient(pressure)
+        )
+        
+        # Advance to next time step
+        velocities_prev = velocities_projected
+        # Plot
+        plt.quiver(
+            X,
+            Y,
+            velocities_projected[..., 0],
+            velocities_projected[..., 1],
+            color="dimgray",
+        )
+        plt.draw()
+        plt.pause(0.0001)
+        plt.clf()
+   
 
 if __name__ == "__main__":
     main()
